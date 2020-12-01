@@ -7,6 +7,8 @@
 #include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
+#include <linux/clk.h>
+#include <linux/reset.h>
 
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
@@ -21,6 +23,12 @@
 struct demp {
 	struct device *dev;
 
+	struct clk *clk_bus;
+	struct clk *clk_ram;
+	struct clk *clk_de;
+	struct reset_control *reset;
+
+	int usage_count;
 	struct mutex mutex[1];
 
 	struct v4l2_device v4l2_dev[1];
@@ -36,6 +44,145 @@ struct demp_context {
 	struct v4l2_pix_format_mplane format_input[1];
 	struct v4l2_pix_format_mplane format_output[1];
 };
+
+static int demp_poweron(struct demp *demp)
+{
+	struct device *dev = demp->dev;
+	int ret;
+
+	dev_info(dev, "%s();\n", __func__);
+
+	clk_set_rate(demp->clk_de, 300000000);
+
+	ret = reset_control_deassert(demp->reset);
+	if (ret) {
+		dev_err(dev, "%s(): reset_control_deassert() failed: %d.\n",
+			__func__, ret);
+		goto err_reset;
+	}
+
+	ret = clk_prepare_enable(demp->clk_bus);
+	if (ret) {
+		dev_err(dev, "%s(): clk_prepare_enable(bus) failed: %d.\n",
+			__func__, ret);
+		goto err_bus;
+	}
+
+	ret = clk_prepare_enable(demp->clk_de);
+	if (ret) {
+		dev_err(dev, "%s(): clk_prepare_enable(de) failed: %d.\n",
+			__func__, ret);
+		goto err_de;
+	}
+
+	ret = clk_prepare_enable(demp->clk_ram);
+	if (ret) {
+		dev_err(dev, "%s(): clk_prepare_enable(ram) failed: %d.\n",
+			__func__, ret);
+		goto err_ram;
+	}
+
+	return 0;
+
+ err_ram:
+	clk_disable_unprepare(demp->clk_de);
+ err_de:
+	clk_disable_unprepare(demp->clk_bus);
+ err_bus:
+	reset_control_assert(demp->reset);
+ err_reset:
+	return 0;
+}
+
+/*
+ * We do not bother with checking return values here, we are powering
+ * down anyway.
+ */
+static int demp_poweroff(struct demp *demp)
+{
+	struct device *dev = demp->dev;
+
+	dev_info(dev, "%s();\n", __func__);
+
+	clk_disable_unprepare(demp->clk_ram);
+
+	clk_disable_unprepare(demp->clk_de);
+
+	clk_disable_unprepare(demp->clk_bus);
+
+	reset_control_assert(demp->reset);
+
+	return 0;
+}
+
+/*
+ * We might want to power up/down depending on actual usage though.
+ */
+static int demp_resume(struct device *dev)
+{
+	struct demp *demp = dev_get_drvdata(dev);
+
+	dev_info(dev, "%s();\n", __func__);
+
+	if (!demp->usage_count)
+		return 0;
+
+	return demp_poweron(demp);
+}
+
+static int demp_suspend(struct device *dev)
+{
+	struct demp *demp = dev_get_drvdata(dev);
+
+	dev_info(dev, "%s();\n", __func__);
+
+	if (!demp->usage_count)
+		return 0;
+
+	return demp_poweroff(demp);
+}
+
+static const struct dev_pm_ops demp_pm_ops = {
+	SET_RUNTIME_PM_OPS(demp_suspend, demp_resume, NULL)
+};
+
+static int demp_resources_get(struct demp *demp,
+			      struct platform_device *platform_dev)
+{
+	struct device *dev = demp->dev;
+
+	dev_info(dev, "%s();\n", __func__);
+
+	demp->clk_bus = devm_clk_get(dev, "bus");
+	if (IS_ERR(demp->clk_bus)) {
+		dev_err(dev, "%s(): devm_clk_get(bus) failed: %ld.\n",
+			__func__, PTR_ERR(demp->clk_bus));
+		return PTR_ERR(demp->clk_bus);
+	}
+
+	demp->clk_de = devm_clk_get(dev, "de");
+	if (IS_ERR(demp->clk_de)) {
+		dev_err(dev, "%s(): devm_clk_get(de) failed: %ld.\n",
+			__func__, PTR_ERR(demp->clk_de));
+		return PTR_ERR(demp->clk_de);
+	}
+
+	demp->clk_ram = devm_clk_get(dev, "ram");
+	if (IS_ERR(demp->clk_ram)) {
+		dev_err(dev, "%s(): devm_clk_get(ram) failed: %ld.\n",
+			__func__, PTR_ERR(demp->clk_ram));
+		return PTR_ERR(demp->clk_ram);
+	}
+
+	demp->reset = devm_reset_control_get(dev, NULL);
+	if (IS_ERR(demp->reset)) {
+		dev_err(dev, "%s(): devm_reset_control_get() failed: %ld.\n",
+			__func__, PTR_ERR(demp->reset));
+		return PTR_ERR(demp->reset);
+	}
+
+	return 0;
+}
 
 static int demp_vb2_queue_setup(struct vb2_queue *vb2_queue,
 				unsigned int *buffer_count,
@@ -215,9 +362,20 @@ static int demp_v4l2_fop_open(struct file *file)
 
 	v4l2_fh_add(fh);
 
+	demp->usage_count++;
+	if (demp->usage_count == 1) {
+		ret = demp_poweron(demp);
+		if (ret) {
+			dev_err(demp->dev, "%s(): demp_poweron(): %d.\n",
+				__func__, ret);
+			goto error;
+		}
+	}
+
 	mutex_unlock(demp->mutex);
 	return 0;
  error:
+	v4l2_fh_del(fh);
 	v4l2_fh_exit(fh);
 	kfree(context);
 	mutex_unlock(demp->mutex);
@@ -236,6 +394,10 @@ static int demp_v4l2_fop_release(struct file *file)
 		return 0;
 
 	mutex_lock(demp->mutex);
+
+	demp->usage_count--;
+	if (!demp->usage_count)
+		demp_poweroff(demp);
 
 	v4l2_m2m_ctx_release(fh->m2m_ctx);
 	v4l2_fh_del(fh);
@@ -684,6 +846,10 @@ static int demp_probe(struct platform_device *platform_dev)
 
 	mutex_init(demp->mutex);
 
+	ret = demp_resources_get(demp, platform_dev);
+	if (ret)
+		return ret;
+
 	platform_set_drvdata(platform_dev, demp);
 
 	ret = demp_v4l2_initialize(demp);
@@ -722,6 +888,7 @@ static struct platform_driver demp_platform_driver = {
 	.driver = {
 		.name = MODULE_NAME,
 		.of_match_table = of_match_ptr(demp_of_match),
+		.pm = &demp_pm_ops,
 	},
 };
 

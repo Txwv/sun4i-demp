@@ -9,11 +9,14 @@
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 #include <linux/reset.h>
+#include <linux/io.h>
 
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
+
+#include "sun4i_demp_reg.h"
 
 #define MODULE_NAME	"sun4i-demp"
 
@@ -27,6 +30,9 @@ struct demp {
 	struct clk *clk_ram;
 	struct clk *clk_de;
 	struct reset_control *reset;
+
+	void __iomem *mmio;
+	struct spinlock io_lock[1];
 
 	int usage_count;
 	struct mutex mutex[1];
@@ -44,6 +50,209 @@ struct demp_context {
 	struct v4l2_pix_format_mplane format_input[1];
 	struct v4l2_pix_format_mplane format_output[1];
 };
+
+static void __maybe_unused demp_reg_write(struct demp *demp,
+					  int address, uint32_t value)
+{
+	writel(value, demp->mmio + address);
+}
+
+static void __maybe_unused demp_reg_write_spin(struct demp *demp,
+					       int address, uint32_t value)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(demp->io_lock, flags);
+
+	writel(value, demp->mmio + address);
+
+	spin_unlock_irqrestore(demp->io_lock, flags);
+}
+
+static uint32_t __maybe_unused demp_reg_read(struct demp *demp,
+					     int address)
+{
+	return readl(demp->mmio + address);
+}
+
+static uint32_t __maybe_unused demp_reg_read_spin(struct demp *demp,
+						  int address)
+{
+	unsigned long flags;
+	uint32_t ret;
+
+	spin_lock_irqsave(demp->io_lock, flags);
+
+	ret = readl(demp->mmio + address);
+
+	spin_unlock_irqrestore(demp->io_lock, flags);
+
+	return ret;
+}
+
+static void __maybe_unused demp_reg_mask(struct demp *demp, int address,
+					 uint32_t value, uint32_t mask)
+{
+	uint32_t temp = readl(demp->mmio + address);
+
+	temp &= ~mask;
+	value &= mask;
+
+	writel(value | temp, demp->mmio + address);
+}
+
+static void __maybe_unused demp_reg_mask_spin(struct demp *demp, int address,
+					      uint32_t value, uint32_t mask)
+{
+	unsigned long flags;
+	uint32_t temp;
+
+	spin_lock_irqsave(demp->io_lock, flags);
+
+	temp = readl(demp->mmio + address);
+
+	temp &= ~mask;
+	value &= mask;
+
+	writel(value | temp, demp->mmio + address);
+
+	spin_unlock_irqrestore(demp->io_lock, flags);
+}
+
+static void __maybe_unused demp_registers_print(struct demp *demp)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(demp->io_lock, flags);
+
+	pr_info("DEMP_REG_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_CONTROL));
+
+	pr_info("DEMP_REG_STATUS: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_STATUS));
+
+	pr_info("DEMP_REG_IDMA_GLOBAL_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA_GLOBAL_CONTROL));
+	pr_info("DEMP_REG_IDMA_ADDRESS_HIGH: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA_ADDRESS_HIGH));
+	pr_info("DEMP_REG_IDMA0_ADDRESS_LOW: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA0_ADDRESS_LOW));
+	pr_info("DEMP_REG_IDMA1_ADDRESS_LOW: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA1_ADDRESS_LOW));
+	pr_info("DEMP_REG_IDMA2_ADDRESS_LOW: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA2_ADDRESS_LOW));
+	pr_info("DEMP_REG_IDMA3_ADDRESS_LOW: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA3_ADDRESS_LOW));
+	pr_info("DEMP_REG_IDMA0_PITCH: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA0_PITCH));
+	pr_info("DEMP_REG_IDMA1_PITCH: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA1_PITCH));
+	pr_info("DEMP_REG_IDMA2_PITCH: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA2_PITCH));
+	pr_info("DEMP_REG_IDMA3_PITCH: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA3_PITCH));
+	pr_info("DEMP_REG_IDMA0_SIZE: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA0_SIZE));
+	pr_info("DEMP_REG_IDMA1_SIZE: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA1_SIZE));
+	pr_info("DEMP_REG_IDMA2_SIZE: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA2_SIZE));
+	pr_info("DEMP_REG_IDMA3_SIZE: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA3_SIZE));
+	pr_info("DEMP_REG_IDMA0_COORD: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA0_COORD));
+	pr_info("DEMP_REG_IDMA1_COORD: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA1_COORD));
+	pr_info("DEMP_REG_IDMA2_COORD: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA2_COORD));
+	pr_info("DEMP_REG_IDMA3_COORD: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA3_COORD));
+	pr_info("DEMP_REG_IDMA0_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA0_CONTROL));
+	pr_info("DEMP_REG_IDMA1_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA1_CONTROL));
+	pr_info("DEMP_REG_IDMA2_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA2_CONTROL));
+	pr_info("DEMP_REG_IDMA3_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA3_CONTROL));
+	pr_info("DEMP_REG_IDMA0_FILLCOLOR: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA0_FILLCOLOR));
+	pr_info("DEMP_REG_IDMA_SORT: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_IDMA_SORT));
+
+	pr_info("DEMP_REG_CSC0_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_CSC0_CONTROL));
+	pr_info("DEMP_REG_CSC1_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_CSC1_CONTROL));
+	pr_info("DEMP_REG_SCALE_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_SCALE_CONTROL));
+
+	pr_info("DEMP_REG_ROP_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_ROP_CONTROL));
+	pr_info("DEMP_REG_ROP_CH3_INDEX0_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_ROP_CH3_INDEX0_CONTROL));
+	pr_info("DEMP_REG_ROP_CH3_INDEX1_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_ROP_CH3_INDEX1_CONTROL));
+	pr_info("DEMP_REG_ALPHA_COLORKEY: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_ALPHA_COLORKEY));
+	pr_info("DEMP_REG_COLORKEY_MIN: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_COLORKEY_MIN));
+	pr_info("DEMP_REG_COLORKEY_MAX: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_COLORKEY_MAX));
+	pr_info("DEMP_REG_ROP_OUT_FILLCOLOR: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_ROP_OUT_FILLCOLOR));
+
+	pr_info("DEMP_REG_CSC2_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_CSC2_CONTROL));
+
+	pr_info("DEMP_REG_OUTPUT_CONTROL: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CONTROL));
+	pr_info("DEMP_REG_OUTPUT_SIZE: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_SIZE));
+	pr_info("DEMP_REG_OUTPUT_ADDRESS_HIGH: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_ADDRESS_HIGH));
+	pr_info("DEMP_REG_OUTPUT_ADDRESS_CH0: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_ADDRESS_CH0));
+	pr_info("DEMP_REG_OUTPUT_ADDRESS_CH1: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_ADDRESS_CH1));
+	pr_info("DEMP_REG_OUTPUT_ADDRESS_CH2: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_ADDRESS_CH2));
+	pr_info("DEMP_REG_OUTPUT_PITCH_CH0: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_PITCH_CH0));
+	pr_info("DEMP_REG_OUTPUT_PITCH_CH1: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_PITCH_CH1));
+	pr_info("DEMP_REG_OUTPUT_PITCH_CH2: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_PITCH_CH2));
+	pr_info("DEMP_REG_OUTPUT_ALPHA: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_ALPHA));
+
+	pr_info("DEMP_REG_OUTPUT_CSC_YG_GY_COEFF: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_YG_GY_COEFF));
+	pr_info("DEMP_REG_OUTPUT_CSC_YG_RU_COEFF: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_YG_RU_COEFF));
+	pr_info("DEMP_REG_OUTPUT_CSC_YG_BV_COEFF: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_YG_BV_COEFF));
+	pr_info("DEMP_REG_OUTPUT_CSC_YG_CONSTANT: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_YG_CONSTANT));
+	pr_info("DEMP_REG_OUTPUT_CSC_UR_GY_COEFF: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_UR_GY_COEFF));
+	pr_info("DEMP_REG_OUTPUT_CSC_UR_RU_COEFF: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_UR_RU_COEFF));
+	pr_info("DEMP_REG_OUTPUT_CSC_UR_BV_COEFF: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_UR_BV_COEFF));
+	pr_info("DEMP_REG_OUTPUT_CSC_UR_CONSTANT: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_UR_CONSTANT));
+	pr_info("DEMP_REG_OUTPUT_CSC_VB_GY_COEFF: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_VB_GY_COEFF));
+	pr_info("DEMP_REG_OUTPUT_CSC_VB_RU_COEFF: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_VB_RU_COEFF));
+	pr_info("DEMP_REG_OUTPUT_CSC_VB_BV_COEFF: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_VB_BV_COEFF));
+	pr_info("DEMP_REG_OUTPUT_CSC_VB_CONSTANT: 0x%08X\n",
+		demp_reg_read(demp, DEMP_REG_OUTPUT_CSC_VB_CONSTANT));
+
+	spin_unlock_irqrestore(demp->io_lock, flags);
+}
 
 static int demp_poweron(struct demp *demp)
 {
@@ -150,6 +359,7 @@ static int demp_resources_get(struct demp *demp,
 			      struct platform_device *platform_dev)
 {
 	struct device *dev = demp->dev;
+	struct resource *resource;
 
 	dev_info(dev, "%s();\n", __func__);
 
@@ -179,6 +389,20 @@ static int demp_resources_get(struct demp *demp,
 		dev_err(dev, "%s(): devm_reset_control_get() failed: %ld.\n",
 			__func__, PTR_ERR(demp->reset));
 		return PTR_ERR(demp->reset);
+	}
+
+	resource = platform_get_resource(platform_dev, IORESOURCE_MEM, 0);
+	if (!resource) {
+		dev_err(dev, "%s(): platform_get_resource() failed.\n",
+			__func__);
+		return EINVAL;
+	}
+
+	demp->mmio = devm_ioremap_resource(dev, resource);
+	if (IS_ERR(demp->mmio)) {
+		dev_err(dev, "%s(): devm_ioremap_resource() failed: %ld.\n",
+			__func__, PTR_ERR(demp->mmio));
+		return PTR_ERR(demp->mmio);
 	}
 
 	return 0;
@@ -845,6 +1069,7 @@ static int demp_probe(struct platform_device *platform_dev)
 	demp->dev = dev;
 
 	mutex_init(demp->mutex);
+	spin_lock_init(demp->io_lock);
 
 	ret = demp_resources_get(demp, platform_dev);
 	if (ret)

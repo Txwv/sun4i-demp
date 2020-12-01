@@ -1,0 +1,15 @@
+Standalone Allwinner A20 Display Engine Mixer Processor driver.
+
+This only needs to convert R8G8B8 to NV12 using V4L2, so we can convert our
+captured image to something the H.264 encoder can accept.
+
+Building:
+---------
+
+make -C /home/libv/fosdem/video/kernel/ ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j4 M=$PWD
+
+Installing:
+-----------
+scp sun4i_demp.ko root@juggler:/lib/modules/5.9.0-rc8-00055-g7a4e6a9-dirty/kernel/drivers/media/platform/sunxi/
+
+You might need to run 'depmod -a' when the new kernel is being run.

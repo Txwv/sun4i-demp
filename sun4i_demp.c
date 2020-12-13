@@ -607,6 +607,22 @@ static struct v4l2_pix_format_mplane format_default_rgba[1] = {{
 	.plane_fmt[0].bytesperline = DEMP_DEFAULT_WIDTH * 4,
 }};
 
+static struct v4l2_pix_format_mplane format_default_prgb[1] = {{
+	.width = DEMP_DEFAULT_WIDTH,
+	.height = DEMP_DEFAULT_HEIGHT,
+	.pixelformat = V4L2_PIX_FMT_R8_G8_B8,
+	.field = V4L2_FIELD_NONE,
+	.colorspace = V4L2_COLORSPACE_SRGB,
+
+	.num_planes = 3,
+	.plane_fmt[0].sizeimage = DEMP_DEFAULT_WIDTH * DEMP_DEFAULT_HEIGHT,
+	.plane_fmt[0].bytesperline = DEMP_DEFAULT_WIDTH,
+	.plane_fmt[1].sizeimage = DEMP_DEFAULT_WIDTH * DEMP_DEFAULT_HEIGHT,
+	.plane_fmt[1].bytesperline = DEMP_DEFAULT_WIDTH,
+	.plane_fmt[2].sizeimage = DEMP_DEFAULT_WIDTH * DEMP_DEFAULT_HEIGHT,
+	.plane_fmt[2].bytesperline = DEMP_DEFAULT_WIDTH,
+}};
+
 static int demp_v4l2_fop_open(struct file *file)
 {
 	struct demp *demp = video_drvdata(file);
@@ -731,6 +747,56 @@ static void demp_input_rgba(struct demp *demp, struct vb2_buffer *buffer,
 	demp_reg_write(demp, DEMP_REG_ROP_CONTROL, 0xF0);
 }
 
+static void demp_input_prgb(struct demp *demp, struct vb2_buffer *buffer,
+			    struct v4l2_pix_format_mplane *format)
+{
+	dma_addr_t addr;
+	uint32_t high = 0;
+	uint16_t width = format->width - 1;
+	uint16_t height = format->height - 1;
+	uint32_t pitch = format->plane_fmt[0].bytesperline << 3;
+
+	addr = vb2_dma_contig_plane_dma_addr(buffer, 0);
+	high |= (addr >> 29) & 0x07;
+	demp_reg_write(demp, DEMP_REG_IDMA0_ADDRESS_LOW, addr << 3);
+
+	addr = vb2_dma_contig_plane_dma_addr(buffer, 1);
+	high |= (addr >> 21) & 0x0700;
+	demp_reg_write(demp, DEMP_REG_IDMA1_ADDRESS_LOW, addr << 3);
+
+	addr = vb2_dma_contig_plane_dma_addr(buffer, 2);
+	high |= (addr >> 13) & 0x070000;
+	demp_reg_write(demp, DEMP_REG_IDMA2_ADDRESS_LOW, addr << 3);
+
+	demp_reg_write(demp, DEMP_REG_IDMA_ADDRESS_HIGH, high);
+
+	demp_reg_write(demp, DEMP_REG_IDMA0_PITCH, pitch);
+	demp_reg_write(demp, DEMP_REG_IDMA1_PITCH, pitch);
+	demp_reg_write(demp, DEMP_REG_IDMA2_PITCH, pitch);
+
+	demp_reg_mask(demp, DEMP_REG_IDMA0_SIZE,
+		      width | (height << 16), 0x1FFF1FFF);
+	demp_reg_mask(demp, DEMP_REG_IDMA1_SIZE,
+		      width | (height << 16), 0x1FFF1FFF);
+	demp_reg_mask(demp, DEMP_REG_IDMA2_SIZE,
+		      width | (height << 16), 0x1FFF1FFF);
+
+	demp_reg_write(demp, DEMP_REG_IDMA0_COORD, 0);
+	demp_reg_write(demp, DEMP_REG_IDMA1_COORD, 0);
+	demp_reg_write(demp, DEMP_REG_IDMA2_COORD, 0);
+
+	/* format is greyscale, alpha defaults to 0xFF, enable. */
+	demp_reg_write(demp, DEMP_REG_IDMA0_CONTROL, 0x0701);
+	demp_reg_write(demp, DEMP_REG_IDMA1_CONTROL, 0x0701);
+	demp_reg_write(demp, DEMP_REG_IDMA2_CONTROL, 0x0701);
+
+	/* disable channel 3 */
+	demp_reg_write(demp, DEMP_REG_IDMA3_CONTROL, 0);
+
+	/* bypass all channels, r -> 0, g -> 1, b -> 2, a -> 0 */
+	demp_reg_write(demp, DEMP_REG_ROP_CONTROL, 0x06F0);
+}
+
 static void demp_output_rgba(struct demp *demp, struct vb2_buffer *buffer,
 			     struct v4l2_pix_format_mplane *format)
 {
@@ -780,7 +846,18 @@ static void demp_m2m_device_run(void *priv)
 
 	demp_reg_write(demp, DEMP_REG_CONTROL, 0x301);
 
-	demp_input_rgba(demp, source_vb2, context->format_input);
+	switch (context->format_input->pixelformat) {
+	case V4L2_PIX_FMT_RGBA32:
+		demp_input_rgba(demp, source_vb2, context->format_input);
+		break;
+	case V4L2_PIX_FMT_R8_G8_B8:
+		demp_input_prgb(demp, source_vb2, context->format_input);
+		break;
+	default:
+		dev_err(demp->dev, "%s(): unhandled input format: 0x%X\n",
+			__func__, context->format_input->pixelformat);
+		break;
+	}
 
 	demp_output_rgba(demp, dest_vb2, context->format_output);
 	demp_csc2_disable(demp);
@@ -850,6 +927,9 @@ static int demp_ioctl_format_input_enumerate(struct file *file,
 	case 0:
 		descriptor->pixelformat = V4L2_PIX_FMT_RGBA32;
 		return 0;
+	case 1:
+		descriptor->pixelformat = V4L2_PIX_FMT_R8_G8_B8;
+		return 0;
 	default:
 		return -EINVAL;
 	}
@@ -909,6 +989,17 @@ static int demp_ioctl_format_input_set(struct file *file, void *handle,
 		input->plane_fmt[0].bytesperline = width * 4;
 		input->plane_fmt[0].sizeimage = size * 4;
 		break;
+	case V4L2_PIX_FMT_R8_G8_B8:
+		*input = format_default_prgb[0];
+		input->width = width;
+		input->height = height;
+		input->plane_fmt[0].bytesperline = width;
+		input->plane_fmt[0].sizeimage = size;
+		input->plane_fmt[1].bytesperline = width;
+		input->plane_fmt[1].sizeimage = size;
+		input->plane_fmt[2].bytesperline = width;
+		input->plane_fmt[2].sizeimage = size;
+		break;
 	default:
 		dev_err(demp->dev, "%s(): unhandled input format: 0x%X\n",
 			__func__, new->pixelformat);
@@ -963,6 +1054,17 @@ static int demp_ioctl_format_input_try(struct file *file, void *handle,
 		try->height = height;
 		try->plane_fmt[0].bytesperline = width * 4;
 		try->plane_fmt[0].sizeimage = size * 4;
+		break;
+	case V4L2_PIX_FMT_R8_G8_B8:
+		*try = format_default_prgb[0];
+		try->width = width;
+		try->height = height;
+		try->plane_fmt[0].bytesperline = width;
+		try->plane_fmt[0].sizeimage = size;
+		try->plane_fmt[1].bytesperline = width;
+		try->plane_fmt[1].sizeimage = size;
+		try->plane_fmt[2].bytesperline = width;
+		try->plane_fmt[2].sizeimage = size;
 		break;
 	default:
 		dev_err(demp->dev, "%s(): unhandled input format: 0x%X\n",

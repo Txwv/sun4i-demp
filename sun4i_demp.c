@@ -635,6 +635,20 @@ static struct v4l2_pix_format_mplane format_default_ayuv[1] = {{
 	.plane_fmt[0].bytesperline = DEMP_DEFAULT_WIDTH * 4,
 }};
 
+static struct v4l2_pix_format_mplane format_default_nv12[1] = {{
+	.width = DEMP_DEFAULT_WIDTH,
+	.height = DEMP_DEFAULT_HEIGHT,
+	.pixelformat = V4L2_PIX_FMT_NV12,
+	.field = V4L2_FIELD_NONE,
+	.colorspace = V4L2_COLORSPACE_REC709,
+
+	.num_planes = 2,
+	.plane_fmt[0].sizeimage = DEMP_DEFAULT_WIDTH * DEMP_DEFAULT_HEIGHT,
+	.plane_fmt[0].bytesperline = DEMP_DEFAULT_WIDTH,
+	.plane_fmt[1].sizeimage = DEMP_DEFAULT_WIDTH * DEMP_DEFAULT_HEIGHT / 2,
+	.plane_fmt[1].bytesperline = DEMP_DEFAULT_WIDTH,
+}};
+
 static int demp_v4l2_fop_open(struct file *file)
 {
 	struct demp *demp = video_drvdata(file);
@@ -860,6 +874,39 @@ static void demp_output_ayuv(struct demp *demp, struct vb2_buffer *buffer,
 	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH2, 0);
 }
 
+static void demp_output_nv12(struct demp *demp, struct vb2_buffer *buffer,
+			     struct v4l2_pix_format_mplane *format)
+{
+	dma_addr_t addr = vb2_dma_contig_plane_dma_addr(buffer, 0);
+	uint32_t high = 0;
+	uint16_t width = format->width - 1;
+	uint16_t height = format->height - 1;
+	uint32_t pitch_y = format->plane_fmt[0].bytesperline << 3;
+	uint32_t pitch_uv = format->plane_fmt[1].bytesperline << 3;
+
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CONTROL, 0x0B);
+
+	demp_reg_mask(demp, DEMP_REG_OUTPUT_SIZE,
+		      width | (height << 16), 0x1FFF1FFF);
+
+	addr = vb2_dma_contig_plane_dma_addr(buffer, 0);
+	high |= (addr >> 29) & 0x07;
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_CH0, addr << 3);
+
+	addr = vb2_dma_contig_plane_dma_addr(buffer, 1);
+	high |= (addr >> 21) & 0x0700;
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_CH1, addr << 3);
+
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_HIGH, high);
+
+	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH0, pitch_y);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH1, pitch_uv);
+
+	/* clear the other channel */
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_CH2, 0);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH2, 0);
+}
+
 static void demp_csc2_disable(struct demp *demp)
 {
 	demp_reg_write(demp, DEMP_REG_CSC2_CONTROL, 0);
@@ -921,6 +968,10 @@ static void demp_m2m_device_run(void *priv)
 		break;
 	case V4L2_PIX_FMT_AYUV32:
 		demp_output_ayuv(demp, dest_vb2, context->format_output);
+		demp_csc2_enable_rec709(demp);
+		break;
+	case V4L2_PIX_FMT_NV12:
+		demp_output_nv12(demp, dest_vb2, context->format_output);
 		demp_csc2_enable_rec709(demp);
 		break;
 	default:
@@ -1082,6 +1133,14 @@ static int demp_ioctl_format_input_set(struct file *file, void *handle,
 		output->plane_fmt[0].bytesperline = width * 4;
 		output->plane_fmt[0].sizeimage = size * 4;
 		break;
+	case V4L2_PIX_FMT_NV12:
+		output->width = width;
+		output->height = height;
+		output->plane_fmt[0].bytesperline = width;
+		output->plane_fmt[0].sizeimage = size;
+		output->plane_fmt[1].bytesperline = width;
+		output->plane_fmt[1].sizeimage = size / 2;
+		break;
 	default:
 		dev_err(demp->dev, "%s(): unhandled output format: 0x%X\n",
 			__func__, output->pixelformat);
@@ -1158,6 +1217,9 @@ static int demp_ioctl_format_output_enumerate(struct file *file,
 	case 1:
 		descriptor->pixelformat = V4L2_PIX_FMT_AYUV32;
 		return 0;
+	case 2:
+		descriptor->pixelformat = V4L2_PIX_FMT_NV12;
+		return 0;
 	default:
 		return -EINVAL;
 	}
@@ -1212,6 +1274,15 @@ static int demp_ioctl_format_output_set(struct file *file, void *handle,
 		output->plane_fmt[0].bytesperline = width * 4;
 		output->plane_fmt[0].sizeimage = size * 4;
 		break;
+	case V4L2_PIX_FMT_NV12:
+		*output = format_default_nv12[0];
+		output->width = width;
+		output->height = height;
+		output->plane_fmt[0].bytesperline = width;
+		output->plane_fmt[0].sizeimage = size;
+		output->plane_fmt[1].bytesperline = width;
+		output->plane_fmt[1].sizeimage = size / 2;
+		break;
 	default:
 		dev_err(demp->dev, "%s(): unhandled output format: 0x%X\n",
 			__func__, new->pixelformat);
@@ -1259,6 +1330,15 @@ static int demp_ioctl_format_output_try(struct file *file, void *handle,
 		try->height = height;
 		try->plane_fmt[0].bytesperline = width * 4;
 		try->plane_fmt[0].sizeimage = size * 4;
+		break;
+	case V4L2_PIX_FMT_NV12:
+		*try = format_default_nv12[0];
+		try->width = width;
+		try->height = height;
+		try->plane_fmt[0].bytesperline = width;
+		try->plane_fmt[0].sizeimage = size;
+		try->plane_fmt[1].bytesperline = width;
+		try->plane_fmt[1].sizeimage = size / 2;
 		break;
 	default:
 		dev_err(demp->dev, "%s(): unhandled output format: 0x%X\n",

@@ -702,10 +702,76 @@ static const struct v4l2_file_operations demp_slashdev_fops = {
 	.poll = v4l2_m2m_fop_poll,
 };
 
+static void demp_input_rgba(struct demp *demp, struct vb2_buffer *buffer,
+			    struct v4l2_pix_format_mplane *format)
+{
+	dma_addr_t addr = vb2_dma_contig_plane_dma_addr(buffer, 0);
+	uint16_t width = format->width - 1;
+	uint16_t height = format->height - 1;
+	uint32_t pitch = format->plane_fmt[0].bytesperline << 3;
+
+	demp_reg_mask(demp, DEMP_REG_IDMA_ADDRESS_HIGH, addr >> 29, 0x07);
+	demp_reg_write(demp, DEMP_REG_IDMA0_ADDRESS_LOW, addr << 3);
+
+	demp_reg_write(demp, DEMP_REG_IDMA0_PITCH, pitch);
+
+	demp_reg_mask(demp, DEMP_REG_IDMA0_SIZE,
+		      width | (height << 16), 0x1FFF1FFF);
+
+	demp_reg_write(demp, DEMP_REG_IDMA0_COORD, 0);
+	/* format is 0, and enable. */
+	demp_reg_write(demp, DEMP_REG_IDMA0_CONTROL, 0x01);
+
+	/* disable others. */
+	demp_reg_write(demp, DEMP_REG_IDMA1_CONTROL, 0);
+	demp_reg_write(demp, DEMP_REG_IDMA2_CONTROL, 0);
+	demp_reg_write(demp, DEMP_REG_IDMA3_CONTROL, 0);
+
+	/* bypass all channels. */
+	demp_reg_write(demp, DEMP_REG_ROP_CONTROL, 0xF0);
+}
+
+static void demp_output_rgba(struct demp *demp, struct vb2_buffer *buffer,
+			     struct v4l2_pix_format_mplane *format)
+{
+	dma_addr_t addr = vb2_dma_contig_plane_dma_addr(buffer, 0);
+	uint16_t width = format->width - 1;
+	uint16_t height = format->height - 1;
+	uint32_t pitch = format->plane_fmt[0].bytesperline << 3;
+
+	/* BGRA */
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CONTROL, 0x800);
+
+	demp_reg_mask(demp, DEMP_REG_OUTPUT_SIZE,
+		      width | (height << 16), 0x1FFF1FFF);
+
+	demp_reg_mask(demp, DEMP_REG_OUTPUT_ADDRESS_HIGH, addr >> 29, 0x07);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_CH0, addr << 3);
+
+	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH0, pitch);
+
+	/* clear other channels */
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_CH1, 0);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH1, 0);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_CH2, 0);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH2, 0);
+}
+
+static void demp_csc2_disable(struct demp *demp)
+{
+	demp_reg_write(demp, DEMP_REG_CSC2_CONTROL, 0);
+}
+
 static void demp_m2m_device_run(void *priv)
 {
 	struct demp_context *context = priv;
 	struct demp *demp = context->demp;
+	struct vb2_v4l2_buffer *source_v4l2 =
+		v4l2_m2m_next_src_buf(context->fh->m2m_ctx);
+	struct vb2_buffer *source_vb2 = &source_v4l2->vb2_buf;
+	struct vb2_v4l2_buffer *dest_v4l2 =
+		v4l2_m2m_next_dst_buf(context->fh->m2m_ctx);
+	struct vb2_buffer *dest_vb2 = &dest_v4l2->vb2_buf;
 	unsigned long flags;
 
 	dev_info(demp->dev, "%s();\n", __func__);
@@ -713,6 +779,11 @@ static void demp_m2m_device_run(void *priv)
 	spin_lock_irqsave(demp->io_lock, flags);
 
 	demp_reg_write(demp, DEMP_REG_CONTROL, 0x301);
+
+	demp_input_rgba(demp, source_vb2, context->format_input);
+
+	demp_output_rgba(demp, dest_vb2, context->format_output);
+	demp_csc2_disable(demp);
 
 	dev_info(demp->dev, "%s(): Go!", __func__);
 	demp_reg_write(demp, DEMP_REG_CONTROL, 0x303); /* GO! */

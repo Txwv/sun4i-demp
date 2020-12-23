@@ -10,6 +10,7 @@
 #include <linux/clk.h>
 #include <linux/reset.h>
 #include <linux/io.h>
+#include <linux/interrupt.h>
 
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
@@ -33,6 +34,8 @@ struct demp {
 
 	void __iomem *mmio;
 	struct spinlock io_lock[1];
+
+	int irq;
 
 	int usage_count;
 	struct mutex mutex[1];
@@ -254,6 +257,47 @@ static void __maybe_unused demp_registers_print(struct demp *demp)
 	spin_unlock_irqrestore(demp->io_lock, flags);
 }
 
+static irqreturn_t demp_isr(int irq, void *dev_id)
+{
+	struct demp *demp = (struct demp *) dev_id;
+	struct demp_context *context = v4l2_m2m_get_curr_priv(demp->m2m_dev);
+	enum vb2_buffer_state state;
+	uint32_t value;
+
+	if (!context) {
+		dev_err(demp->dev, "%s(): no context!\n", __func__);
+		return IRQ_NONE;
+	}
+
+	spin_lock(demp->io_lock);
+
+	value = demp_reg_read(demp, DEMP_REG_STATUS);
+
+	/* ack. */
+	demp_reg_write(demp, DEMP_REG_STATUS, 0x300);
+	/*
+	 * some brokenness it seems, it needs this to reinit future
+	 * interrupts.
+	 */
+	demp_reg_write(demp, DEMP_REG_CONTROL, 0);
+
+	spin_unlock(demp->io_lock);
+
+	if (value & 0x100) /* finished. */
+		state = VB2_BUF_STATE_DONE;
+	else if (value & 0x200) /* error */
+		state = VB2_BUF_STATE_ERROR;
+	else {
+		dev_err(demp->dev, "%s(): invalid value: 0x%08X\n",
+			__func__, value);
+		return IRQ_NONE;
+	}
+
+	v4l2_m2m_buf_done_and_job_finish(demp->m2m_dev, context->fh->m2m_ctx,
+					 state);
+	return IRQ_HANDLED;
+}
+
 static int demp_poweron(struct demp *demp)
 {
 	struct device *dev = demp->dev;
@@ -360,6 +404,7 @@ static int demp_resources_get(struct demp *demp,
 {
 	struct device *dev = demp->dev;
 	struct resource *resource;
+	int irq, ret;
 
 	dev_info(dev, "%s();\n", __func__);
 
@@ -404,6 +449,21 @@ static int demp_resources_get(struct demp *demp,
 			__func__, PTR_ERR(demp->mmio));
 		return PTR_ERR(demp->mmio);
 	}
+
+	irq = platform_get_irq(platform_dev, 0);
+	if (irq < 0) {
+		dev_err(dev, "%s(): platform_get_irq() failed: %d.\n",
+			__func__, -irq);
+		return -irq;
+	}
+
+	ret = devm_request_irq(dev, irq, demp_isr, 0, MODULE_NAME, demp);
+	if (ret) {
+		dev_err(dev, "%s(): devm_request_irq(\"%s\") failed: %d.\n",
+			__func__, "demp", ret);
+		return ret;
+	}
+	demp->irq = irq;
 
 	return 0;
 }
@@ -646,14 +706,18 @@ static void demp_m2m_device_run(void *priv)
 {
 	struct demp_context *context = priv;
 	struct demp *demp = context->demp;
+	unsigned long flags;
 
 	dev_info(demp->dev, "%s();\n", __func__);
 
-	/*
-	 * Since we do not do any real work yet, act as if we did immediately.
-	 */
-	v4l2_m2m_buf_done_and_job_finish(demp->m2m_dev, context->fh->m2m_ctx,
-					 VB2_BUF_STATE_DONE);
+	spin_lock_irqsave(demp->io_lock, flags);
+
+	demp_reg_write(demp, DEMP_REG_CONTROL, 0x301);
+
+	dev_info(demp->dev, "%s(): Go!", __func__);
+	demp_reg_write(demp, DEMP_REG_CONTROL, 0x303); /* GO! */
+
+	spin_unlock_irqrestore(demp->io_lock, flags);
 }
 
 /*
@@ -669,6 +733,9 @@ static void demp_m2m_job_abort(void *priv)
 	struct demp *demp = context->demp;
 
 	dev_info(demp->dev, "%s();\n", __func__);
+
+	/* shut down. */
+	demp_reg_write_spin(demp, DEMP_REG_CONTROL, 0);
 
 	/*
 	 * TODO: Figure out whether the engine is busy first, and then return

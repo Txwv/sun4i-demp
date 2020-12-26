@@ -623,6 +623,18 @@ static struct v4l2_pix_format_mplane format_default_prgb[1] = {{
 	.plane_fmt[2].bytesperline = DEMP_DEFAULT_WIDTH,
 }};
 
+static struct v4l2_pix_format_mplane format_default_ayuv[1] = {{
+	.width = DEMP_DEFAULT_WIDTH,
+	.height = DEMP_DEFAULT_HEIGHT,
+	.pixelformat = V4L2_PIX_FMT_AYUV32,
+	.field = V4L2_FIELD_NONE,
+	.colorspace = V4L2_COLORSPACE_REC709,
+
+	.num_planes = 1,
+	.plane_fmt[0].sizeimage = DEMP_DEFAULT_WIDTH * DEMP_DEFAULT_HEIGHT * 4,
+	.plane_fmt[0].bytesperline = DEMP_DEFAULT_WIDTH * 4,
+}};
+
 static int demp_v4l2_fop_open(struct file *file)
 {
 	struct demp *demp = video_drvdata(file);
@@ -823,9 +835,52 @@ static void demp_output_rgba(struct demp *demp, struct vb2_buffer *buffer,
 	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH2, 0);
 }
 
+static void demp_output_ayuv(struct demp *demp, struct vb2_buffer *buffer,
+			     struct v4l2_pix_format_mplane *format)
+{
+	dma_addr_t addr = vb2_dma_contig_plane_dma_addr(buffer, 0);
+	uint16_t width = format->width - 1;
+	uint16_t height = format->height - 1;
+	uint32_t pitch = format->plane_fmt[0].bytesperline << 3;
+
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CONTROL, 0);
+
+	demp_reg_mask(demp, DEMP_REG_OUTPUT_SIZE,
+		      width | (height << 16), 0x1FFF1FFF);
+
+	demp_reg_mask(demp, DEMP_REG_OUTPUT_ADDRESS_HIGH, addr >> 29, 0x07);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_CH0, addr << 3);
+
+	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH0, pitch);
+
+	/* clear other channels */
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_CH1, 0);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH1, 0);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_ADDRESS_CH2, 0);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_PITCH_CH2, 0);
+}
+
 static void demp_csc2_disable(struct demp *demp)
 {
 	demp_reg_write(demp, DEMP_REG_CSC2_CONTROL, 0);
+}
+
+static void demp_csc2_enable_rec709(struct demp *demp)
+{
+	demp_reg_write(demp, DEMP_REG_CSC2_CONTROL, 0x01);
+
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_YG_GY_COEFF, 0x0275);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_YG_RU_COEFF, 0x00BB);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_YG_BV_COEFF, 0x003F);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_YG_CONSTANT, 0x0100);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_UR_GY_COEFF, 0x1EA6);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_UR_RU_COEFF, 0x1F99);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_UR_BV_COEFF, 0x01C2);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_UR_CONSTANT, 0x0800);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_VB_GY_COEFF, 0x1E67);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_VB_RU_COEFF, 0x01C2);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_VB_BV_COEFF, 0x1FD7);
+	demp_reg_write(demp, DEMP_REG_OUTPUT_CSC_VB_CONSTANT, 0x0800);
 }
 
 static void demp_m2m_device_run(void *priv)
@@ -859,8 +914,20 @@ static void demp_m2m_device_run(void *priv)
 		break;
 	}
 
-	demp_output_rgba(demp, dest_vb2, context->format_output);
-	demp_csc2_disable(demp);
+	switch (context->format_output->pixelformat) {
+	case V4L2_PIX_FMT_RGBA32:
+		demp_output_rgba(demp, dest_vb2, context->format_output);
+		demp_csc2_disable(demp);
+		break;
+	case V4L2_PIX_FMT_AYUV32:
+		demp_output_ayuv(demp, dest_vb2, context->format_output);
+		demp_csc2_enable_rec709(demp);
+		break;
+	default:
+		dev_err(demp->dev, "%s: unhandled output format %d\n",
+			__func__, context->format_output->pixelformat);
+		break;
+	}
 
 	dev_info(demp->dev, "%s(): Go!", __func__);
 	demp_reg_write(demp, DEMP_REG_CONTROL, 0x303); /* GO! */
@@ -1009,6 +1076,7 @@ static int demp_ioctl_format_input_set(struct file *file, void *handle,
 	/* now force the same size on the output format */
 	switch (output->pixelformat) {
 	case V4L2_PIX_FMT_RGBA32:
+	case V4L2_PIX_FMT_AYUV32:
 		output->width = width;
 		output->height = height;
 		output->plane_fmt[0].bytesperline = width * 4;
@@ -1087,6 +1155,9 @@ static int demp_ioctl_format_output_enumerate(struct file *file,
 	case 0:
 		descriptor->pixelformat = V4L2_PIX_FMT_RGBA32;
 		return 0;
+	case 1:
+		descriptor->pixelformat = V4L2_PIX_FMT_AYUV32;
+		return 0;
 	default:
 		return -EINVAL;
 	}
@@ -1134,6 +1205,13 @@ static int demp_ioctl_format_output_set(struct file *file, void *handle,
 		output->plane_fmt[0].bytesperline = width * 4;
 		output->plane_fmt[0].sizeimage = size * 4;
 		break;
+	case V4L2_PIX_FMT_AYUV32:
+		*output = format_default_ayuv[0];
+		output->width = width;
+		output->height = height;
+		output->plane_fmt[0].bytesperline = width * 4;
+		output->plane_fmt[0].sizeimage = size * 4;
+		break;
 	default:
 		dev_err(demp->dev, "%s(): unhandled output format: 0x%X\n",
 			__func__, new->pixelformat);
@@ -1170,6 +1248,13 @@ static int demp_ioctl_format_output_try(struct file *file, void *handle,
 	switch (try->pixelformat) {
 	case V4L2_PIX_FMT_RGBA32:
 		*try = format_default_rgba[0];
+		try->width = width;
+		try->height = height;
+		try->plane_fmt[0].bytesperline = width * 4;
+		try->plane_fmt[0].sizeimage = size * 4;
+		break;
+	case V4L2_PIX_FMT_AYUV32:
+		*try = format_default_ayuv[0];
 		try->width = width;
 		try->height = height;
 		try->plane_fmt[0].bytesperline = width * 4;

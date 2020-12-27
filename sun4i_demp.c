@@ -15,6 +15,9 @@
 
 #define MODULE_NAME	"sun4i-demp"
 
+#define DEMP_DEFAULT_WIDTH 640
+#define DEMP_DEFAULT_HEIGHT 480
+
 struct demp {
 	struct device *dev;
 
@@ -29,6 +32,9 @@ struct demp {
 struct demp_context {
 	struct v4l2_fh fh[1];
 	struct demp *demp;
+
+	struct v4l2_pix_format_mplane format_input[1];
+	struct v4l2_pix_format_mplane format_output[1];
 };
 
 static int demp_vb2_queue_setup(struct vb2_queue *vb2_queue,
@@ -40,15 +46,25 @@ static int demp_vb2_queue_setup(struct vb2_queue *vb2_queue,
 	struct demp_context *context = vb2_get_drv_priv(vb2_queue);
 	struct demp *demp = context->demp;
 	enum v4l2_buf_type type = vb2_queue->type;
+	struct v4l2_pix_format_mplane *format;
+	int i;
 
 	if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		dev_info(demp->dev, "%s(input);\n", __func__);
+
+		format = context->format_input;
 	} else if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		dev_info(demp->dev, "%s(output);\n", __func__);
+
+		format = context->format_output;
 	} else {
 		dev_err(demp->dev, "%s(): wrong type %d\n", __func__, type);
 		return -EINVAL;
 	}
+
+	*plane_count = format->num_planes;
+	for (i = 0; i < format->num_planes; i++)
+		sizes[i] = format->plane_fmt[i].sizeimage;
 
 	return 0;
 }
@@ -58,15 +74,25 @@ static int demp_vb2_buffer_prepare(struct vb2_buffer *vb2_buffer)
 	struct demp_context *context = vb2_get_drv_priv(vb2_buffer->vb2_queue);
 	struct demp *demp = context->demp;
 	enum v4l2_buf_type type = vb2_buffer->vb2_queue->type;
+	struct v4l2_pix_format_mplane *format;
+	int i;
 
 	if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		dev_info(demp->dev, "%s(input);\n", __func__);
+
+		format = context->format_input;
 	} else if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		dev_info(demp->dev, "%s(output);\n", __func__);
+
+		format = context->format_output;
 	} else {
 		dev_err(demp->dev, "%s(): wrong type %d\n", __func__, type);
 		return -EINVAL;
 	}
+
+	for (i = 0; i < format->num_planes; i++)
+		vb2_set_plane_payload(vb2_buffer, i,
+				      format->plane_fmt[i].sizeimage);
 
 	return 0;
 }
@@ -138,6 +164,18 @@ demp_vb2_queue_init(void *priv,
 	return 0;
 }
 
+static struct v4l2_pix_format_mplane format_default_rgba[1] = {{
+	.width = DEMP_DEFAULT_WIDTH,
+	.height = DEMP_DEFAULT_HEIGHT,
+	.pixelformat = V4L2_PIX_FMT_RGBA32,
+	.field = V4L2_FIELD_NONE,
+	.colorspace = V4L2_COLORSPACE_SRGB,
+
+	.num_planes = 1,
+	.plane_fmt[0].sizeimage = DEMP_DEFAULT_WIDTH * DEMP_DEFAULT_HEIGHT * 4,
+	.plane_fmt[0].bytesperline = DEMP_DEFAULT_WIDTH * 4,
+}};
+
 static int demp_v4l2_fop_open(struct file *file)
 {
 	struct demp *demp = video_drvdata(file);
@@ -159,6 +197,9 @@ static int demp_v4l2_fop_open(struct file *file)
 
 	file->private_data = context;
 	context->demp = demp;
+
+	*context->format_input = format_default_rgba[0];
+	*context->format_output = format_default_rgba[0];
 
 	fh = context->fh;
 	v4l2_fh_init(fh, vdev);
@@ -281,25 +322,91 @@ static int demp_ioctl_format_input_enumerate(struct file *file,
 
 	dev_info(demp->dev, "%s();\n", __func__);
 
-	return 0;
+	switch (descriptor->index) {
+	case 0:
+		descriptor->pixelformat = V4L2_PIX_FMT_RGBA32;
+		return 0;
+	default:
+		return -EINVAL;
+	}
 }
 
 static int demp_ioctl_format_input_get(struct file *file, void *handle,
 				       struct v4l2_format *format)
 {
 	struct demp *demp = video_drvdata(file);
+	struct demp_context *context = file->private_data;
 
 	dev_info(demp->dev, "%s();\n", __func__);
+
+	format->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+	format->fmt.pix_mp = context->format_input[0];
 
 	return 0;
 }
 
+#define DEMP_MAX_WIDTH 8192
+#define DEMP_MAX_HEIGHT DEMP_MAX_WIDTH
+
+/*
+ * This sets dimensions for both in and output.
+ */
 static int demp_ioctl_format_input_set(struct file *file, void *handle,
 				       struct v4l2_format *format_new)
 {
 	struct demp *demp = video_drvdata(file);
+	struct demp_context *context = file->private_data;
+	struct v4l2_pix_format_mplane *new =
+		&format_new->fmt.pix_mp;
+	struct v4l2_pix_format_mplane *input = context->format_input;
+	struct v4l2_pix_format_mplane *output = context->format_output;
+	int width = new->width;
+	int height = new->height;
+	int size;
 
 	dev_info(demp->dev, "%s();\n", __func__);
+
+	/* 2-align, as we might be converting to NV12 */
+	width = ALIGN(width, 2);
+	if (width > DEMP_MAX_WIDTH)
+		width = DEMP_MAX_WIDTH;
+
+	height = ALIGN(height, 2);
+	if (height > DEMP_MAX_HEIGHT)
+		height = DEMP_MAX_HEIGHT;
+
+	size = width * height;
+
+	switch (new->pixelformat) {
+	case V4L2_PIX_FMT_RGBA32:
+		*input = format_default_rgba[0];
+		input->width = width;
+		input->height = height;
+		input->plane_fmt[0].bytesperline = width * 4;
+		input->plane_fmt[0].sizeimage = size * 4;
+		break;
+	default:
+		dev_err(demp->dev, "%s(): unhandled input format: 0x%X\n",
+			__func__, new->pixelformat);
+		return -EINVAL;
+	}
+
+	/* now force the same size on the output format */
+	switch (output->pixelformat) {
+	case V4L2_PIX_FMT_RGBA32:
+		output->width = width;
+		output->height = height;
+		output->plane_fmt[0].bytesperline = width * 4;
+		output->plane_fmt[0].sizeimage = size * 4;
+		break;
+	default:
+		dev_err(demp->dev, "%s(): unhandled output format: 0x%X\n",
+			__func__, output->pixelformat);
+		break;
+	}
+
+	format_new->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+	format_new->fmt.pix_mp = context->format_input[0];
 
 	return 0;
 }
@@ -308,8 +415,36 @@ static int demp_ioctl_format_input_try(struct file *file, void *handle,
 				       struct v4l2_format *format_try)
 {
 	struct demp *demp = video_drvdata(file);
+	struct v4l2_pix_format_mplane *try = &format_try->fmt.pix_mp;
+	int width = try->width;
+	int height = try->height;
+	int size;
 
 	dev_info(demp->dev, "%s();\n", __func__);
+
+	width = ALIGN(try->width, 2);
+	if (width > DEMP_MAX_WIDTH)
+		width = DEMP_MAX_WIDTH;
+
+	height = ALIGN(try->height, 2);
+	if (height > DEMP_MAX_HEIGHT)
+		height = DEMP_MAX_HEIGHT;
+
+	size = width * height;
+
+	switch (try->pixelformat) {
+	case V4L2_PIX_FMT_RGBA32:
+		*try = format_default_rgba[0];
+		try->width = width;
+		try->height = height;
+		try->plane_fmt[0].bytesperline = width * 4;
+		try->plane_fmt[0].sizeimage = size * 4;
+		break;
+	default:
+		dev_err(demp->dev, "%s(): unhandled input format: 0x%X\n",
+			__func__, try->pixelformat);
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -322,25 +457,65 @@ static int demp_ioctl_format_output_enumerate(struct file *file,
 
 	dev_info(demp->dev, "%s();\n", __func__);
 
-	return 0;
+	switch (descriptor->index) {
+	case 0:
+		descriptor->pixelformat = V4L2_PIX_FMT_RGBA32;
+		return 0;
+	default:
+		return -EINVAL;
+	}
 }
 
 static int demp_ioctl_format_output_get(struct file *file, void *handle,
 					struct v4l2_format *format)
 {
 	struct demp *demp = video_drvdata(file);
+	struct demp_context *context = file->private_data;
 
 	dev_info(demp->dev, "%s();\n", __func__);
+
+	format->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+	format->fmt.pix_mp = context->format_output[0];
 
 	return 0;
 }
 
+/*
+ * Ignore everything, except pixelformat changes, and use input width/height
+ */
 static int demp_ioctl_format_output_set(struct file *file, void *handle,
 					struct v4l2_format *format_new)
 {
 	struct demp *demp = video_drvdata(file);
+	struct demp_context *context = file->private_data;
+	struct v4l2_pix_format_mplane *new =
+		&format_new->fmt.pix_mp;
+	struct v4l2_pix_format_mplane *input = context->format_input;
+	struct v4l2_pix_format_mplane *output = context->format_output;
+	int width = input->width;
+	int height = input->height;
+	int size = width * height;
 
 	dev_info(demp->dev, "%s();\n", __func__);
+
+	/* width/height was already aligned and clamped when setting input */
+
+	switch (new->pixelformat) {
+	case V4L2_PIX_FMT_RGBA32:
+		*output = format_default_rgba[0];
+		output->width = width;
+		output->height = height;
+		output->plane_fmt[0].bytesperline = width * 4;
+		output->plane_fmt[0].sizeimage = size * 4;
+		break;
+	default:
+		dev_err(demp->dev, "%s(): unhandled output format: 0x%X\n",
+			__func__, new->pixelformat);
+		return -EINVAL;
+	}
+
+	format_new->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+	format_new->fmt.pix_mp = context->format_output[0];
 
 	return 0;
 }
@@ -349,8 +524,36 @@ static int demp_ioctl_format_output_try(struct file *file, void *handle,
 					struct v4l2_format *format_try)
 {
 	struct demp *demp = video_drvdata(file);
+	struct v4l2_pix_format_mplane *try = &format_try->fmt.pix_mp;
+	int width = try->width;
+	int height = try->height;
+	int size;
 
 	dev_info(demp->dev, "%s();\n", __func__);
+
+	width = ALIGN(width, 2);
+	if (width > DEMP_MAX_WIDTH)
+		width = DEMP_MAX_WIDTH;
+
+	height = ALIGN(height, 2);
+	if (height > DEMP_MAX_HEIGHT)
+		height = DEMP_MAX_HEIGHT;
+
+	size = width * height;
+
+	switch (try->pixelformat) {
+	case V4L2_PIX_FMT_RGBA32:
+		*try = format_default_rgba[0];
+		try->width = width;
+		try->height = height;
+		try->plane_fmt[0].bytesperline = width * 4;
+		try->plane_fmt[0].sizeimage = size * 4;
+		break;
+	default:
+		dev_err(demp->dev, "%s(): unhandled output format: 0x%X\n",
+			__func__, try->pixelformat);
+		return -EINVAL;
+	}
 
 	return 0;
 }

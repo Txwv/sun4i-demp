@@ -54,6 +54,13 @@ struct demp_context {
 	struct v4l2_pix_format_mplane format_output[1];
 };
 
+#if 0
+#define DEMP_DEBUG 1
+#define demp_dbg(dev, fmt, arg...) dev_info(dev, fmt, ## arg)
+#else
+#define demp_dbg(dev, fmt, arg...)
+#endif
+
 static void __maybe_unused demp_reg_write(struct demp *demp,
 					  int address, uint32_t value)
 {
@@ -122,6 +129,7 @@ static void __maybe_unused demp_reg_mask_spin(struct demp *demp, int address,
 	spin_unlock_irqrestore(demp->io_lock, flags);
 }
 
+#ifdef DEMP_DEBUG
 static void __maybe_unused demp_registers_print(struct demp *demp)
 {
 	unsigned long flags;
@@ -256,6 +264,7 @@ static void __maybe_unused demp_registers_print(struct demp *demp)
 
 	spin_unlock_irqrestore(demp->io_lock, flags);
 }
+#endif /* DEMP_DEBUG */
 
 static irqreturn_t demp_isr(int irq, void *dev_id)
 {
@@ -303,7 +312,7 @@ static int demp_poweron(struct demp *demp)
 	struct device *dev = demp->dev;
 	int ret;
 
-	dev_info(dev, "%s();\n", __func__);
+	demp_dbg(dev, "%s();\n", __func__);
 
 	clk_set_rate(demp->clk_de, 300000000);
 
@@ -353,9 +362,7 @@ static int demp_poweron(struct demp *demp)
  */
 static int demp_poweroff(struct demp *demp)
 {
-	struct device *dev = demp->dev;
-
-	dev_info(dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	clk_disable_unprepare(demp->clk_ram);
 
@@ -375,7 +382,7 @@ static int demp_resume(struct device *dev)
 {
 	struct demp *demp = dev_get_drvdata(dev);
 
-	dev_info(dev, "%s();\n", __func__);
+	demp_dbg(dev, "%s();\n", __func__);
 
 	if (!demp->usage_count)
 		return 0;
@@ -387,7 +394,7 @@ static int demp_suspend(struct device *dev)
 {
 	struct demp *demp = dev_get_drvdata(dev);
 
-	dev_info(dev, "%s();\n", __func__);
+	demp_dbg(dev, "%s();\n", __func__);
 
 	if (!demp->usage_count)
 		return 0;
@@ -406,7 +413,7 @@ static int demp_resources_get(struct demp *demp,
 	struct resource *resource;
 	int irq, ret;
 
-	dev_info(dev, "%s();\n", __func__);
+	demp_dbg(dev, "%s();\n", __func__);
 
 	demp->clk_bus = devm_clk_get(dev, "bus");
 	if (IS_ERR(demp->clk_bus)) {
@@ -481,11 +488,11 @@ static int demp_vb2_queue_setup(struct vb2_queue *vb2_queue,
 	int i;
 
 	if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
-		dev_info(demp->dev, "%s(input);\n", __func__);
+		demp_dbg(demp->dev, "%s(input);\n", __func__);
 
 		format = context->format_input;
 	} else if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-		dev_info(demp->dev, "%s(output);\n", __func__);
+		demp_dbg(demp->dev, "%s(output);\n", __func__);
 
 		format = context->format_output;
 	} else {
@@ -509,11 +516,11 @@ static int demp_vb2_buffer_prepare(struct vb2_buffer *vb2_buffer)
 	int i;
 
 	if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
-		dev_info(demp->dev, "%s(input);\n", __func__);
+		demp_dbg(demp->dev, "%s(input);\n", __func__);
 
 		format = context->format_input;
 	} else if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-		dev_info(demp->dev, "%s(output);\n", __func__);
+		demp_dbg(demp->dev, "%s(output);\n", __func__);
 
 		format = context->format_output;
 	} else {
@@ -533,7 +540,7 @@ static void demp_vb2_buffer_queue(struct vb2_buffer *vb2_buffer)
 	struct demp_context *context = vb2_get_drv_priv(vb2_buffer->vb2_queue);
 	struct vb2_v4l2_buffer *v4l2_buffer = to_vb2_v4l2_buffer(vb2_buffer);
 
-	dev_info(context->demp->dev, "%s();\n", __func__);
+	demp_dbg(context->demp->dev, "%s();\n", __func__);
 
 	v4l2_m2m_buf_queue(context->fh->m2m_ctx, v4l2_buffer);
 }
@@ -554,7 +561,7 @@ demp_vb2_queue_init(void *priv,
 	struct demp *demp = context->demp;
 	int ret;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	source->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 	source->io_modes = VB2_MMAP | VB2_DMABUF;
@@ -657,7 +664,7 @@ static int demp_v4l2_fop_open(struct file *file)
 	struct v4l2_fh *fh = NULL;
 	int ret;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	if (mutex_lock_interruptible(demp->mutex))
 		return -ERESTARTSYS;
@@ -714,7 +721,7 @@ static int demp_v4l2_fop_release(struct file *file)
 	struct demp_context *context = file->private_data;
 	struct v4l2_fh *fh = context->fh;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	if (!context)
 		return 0;
@@ -942,7 +949,7 @@ static void demp_m2m_device_run(void *priv)
 	struct vb2_buffer *dest_vb2 = &dest_v4l2->vb2_buf;
 	unsigned long flags;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	spin_lock_irqsave(demp->io_lock, flags);
 
@@ -980,7 +987,7 @@ static void demp_m2m_device_run(void *priv)
 		break;
 	}
 
-	dev_info(demp->dev, "%s(): Go!", __func__);
+	demp_dbg(demp->dev, "%s(): Go!", __func__);
 	demp_reg_write(demp, DEMP_REG_CONTROL, 0x303); /* GO! */
 
 	spin_unlock_irqrestore(demp->io_lock, flags);
@@ -998,7 +1005,7 @@ static void demp_m2m_job_abort(void *priv)
 	struct demp_context *context = priv;
 	struct demp *demp = context->demp;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	/* shut down. */
 	demp_reg_write_spin(demp, DEMP_REG_CONTROL, 0);
@@ -1021,7 +1028,7 @@ static int demp_ioctl_capability_query(struct file *file, void *handle,
 {
 	struct demp *demp = video_drvdata(file);
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	strscpy(capability->driver, "sun4i_demp", sizeof(capability->driver));
 	strscpy(capability->card, demp->slashdev->name,
@@ -1037,9 +1044,9 @@ static int demp_ioctl_format_input_enumerate(struct file *file,
 					     void *handle,
 					     struct v4l2_fmtdesc *descriptor)
 {
-	struct demp *demp = video_drvdata(file);
+	struct demp __maybe_unused *demp = video_drvdata(file);
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	switch (descriptor->index) {
 	case 0:
@@ -1056,10 +1063,9 @@ static int demp_ioctl_format_input_enumerate(struct file *file,
 static int demp_ioctl_format_input_get(struct file *file, void *handle,
 				       struct v4l2_format *format)
 {
-	struct demp *demp = video_drvdata(file);
 	struct demp_context *context = file->private_data;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(context->demp->dev, "%s();\n", __func__);
 
 	format->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 	format->fmt.pix_mp = context->format_input[0];
@@ -1086,7 +1092,7 @@ static int demp_ioctl_format_input_set(struct file *file, void *handle,
 	int height = new->height;
 	int size;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	/* 2-align, as we might be converting to NV12 */
 	width = ALIGN(width, 2);
@@ -1162,7 +1168,7 @@ static int demp_ioctl_format_input_try(struct file *file, void *handle,
 	int height = try->height;
 	int size;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	width = ALIGN(try->width, 2);
 	if (width > DEMP_MAX_WIDTH)
@@ -1206,9 +1212,9 @@ static int demp_ioctl_format_output_enumerate(struct file *file,
 					      void *handle,
 					      struct v4l2_fmtdesc *descriptor)
 {
-	struct demp *demp = video_drvdata(file);
+	struct demp __maybe_unused *demp = video_drvdata(file);
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	switch (descriptor->index) {
 	case 0:
@@ -1228,10 +1234,9 @@ static int demp_ioctl_format_output_enumerate(struct file *file,
 static int demp_ioctl_format_output_get(struct file *file, void *handle,
 					struct v4l2_format *format)
 {
-	struct demp *demp = video_drvdata(file);
 	struct demp_context *context = file->private_data;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(context->demp->dev, "%s();\n", __func__);
 
 	format->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	format->fmt.pix_mp = context->format_output[0];
@@ -1255,7 +1260,7 @@ static int demp_ioctl_format_output_set(struct file *file, void *handle,
 	int height = input->height;
 	int size = width * height;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	/* width/height was already aligned and clamped when setting input */
 
@@ -1304,7 +1309,7 @@ static int demp_ioctl_format_output_try(struct file *file, void *handle,
 	int height = try->height;
 	int size;
 
-	dev_info(demp->dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	width = ALIGN(width, 2);
 	if (width > DEMP_MAX_WIDTH)
@@ -1417,7 +1422,7 @@ static int demp_v4l2_initialize(struct demp *demp)
 	struct v4l2_m2m_dev *m2m_dev;
 	int ret;
 
-	dev_info(dev, "%s();\n", __func__);
+	demp_dbg(dev, "%s();\n", __func__);
 
 	ret = v4l2_device_register(dev, demp->v4l2_dev);
 	if (ret) {
@@ -1449,9 +1454,7 @@ static int demp_v4l2_initialize(struct demp *demp)
 
 static int demp_v4l2_cleanup(struct demp *demp)
 {
-	struct device *dev = demp->dev;
-
-	dev_info(dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	v4l2_m2m_release(demp->m2m_dev);
 	demp_slashdev_free(demp);
@@ -1466,7 +1469,7 @@ static int demp_probe(struct platform_device *platform_dev)
 	struct demp *demp;
 	int ret;
 
-	dev_info(dev, "%s();\n", __func__);
+	demp_dbg(dev, "%s();\n", __func__);
 
 	demp = devm_kzalloc(dev, sizeof(struct demp), GFP_KERNEL);
 	if (!demp)
@@ -1486,16 +1489,17 @@ static int demp_probe(struct platform_device *platform_dev)
 	if (ret)
 		return ret;
 
+	dev_info(dev, "Sun4i Display Engine Mixer Processor driver loaded.\n");
+
 	return 0;
 }
 
 static int demp_remove(struct platform_device *platform_dev)
 {
-	struct device *dev = &platform_dev->dev;
 	struct demp *demp = platform_get_drvdata(platform_dev);
 	int ret;
 
-	dev_info(dev, "%s();\n", __func__);
+	demp_dbg(demp->dev, "%s();\n", __func__);
 
 	ret = demp_v4l2_cleanup(demp);
 	if (ret)
